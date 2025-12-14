@@ -1,26 +1,18 @@
 # Core web framework for the app
-streamlit==1.32.0  # Latest stable version as of 2025, or remove version for newest
+streamlit==1.32.0
 
-# Deep learning framework (use CPU version for lighter size and no GPU issues on Streamlit Cloud)
-tensorflow-cpu==2.15.0  # Or latest 2.x; avoids full tensorflow with GPU deps
+# Deep learning (CPU version to avoid GPU warnings on Streamlit Cloud)
+tensorflow-cpu==2.15.0
 
-# Alternative: full tensorflow if you need potential GPU support (but bigger and may have warnings)
-# tensorflow==2.15.0
+# Image processing (headless REQUIRED for no libGL error)
+opencv-python-headless==4.9.0.80
 
-# Image processing (headless version REQUIRED for Streamlit Cloud to avoid libGL errors)
-opencv-python-headless==4.9.0.80  # Headless fixes "cannot open shared object file" issue
+# Image handling
+Pillow==10.2.0
 
-# For handling images in Streamlit (upload/display)
-Pillow==10.2.0  # PIL library
-
-# Numerical computations and array handling
+# Numerical and scientific
 numpy==1.26.4
-
-# Scientific computing (often used for image ops in segmentation)
 scipy==1.11.4
 
-# Optional: If your app uses scikit-image for extra processing (common in segmentation)
-# scikit-image==0.22.0
-
-# Optional: If you use matplotlib for plots (e.g., show results)
-# matplotlib==3.8.2
+# Google Gemini API (for genai features like explanation or multimodal)
+google-genai==0.5.0
