@@ -1,5 +1,4 @@
 import os
-import subprocess
 import numpy as np
 import tensorflow as tf
 import streamlit as st
@@ -8,39 +7,13 @@ import cv2
 from PIL import Image
 
 # --- GEMINI IMPORT ---
-from google import genai  # Kalau error, coba: import google.genai as genai
+from google import genai
 from google.genai import types
-
-# Force pull LFS files (fix kalau git-lfs available)
-def pull_lfs_files():
-    try:
-        # Cek dulu kalau git-lfs ada
-        subprocess.run(["git", "lfs", "--version"], check=True, capture_output=True)
-        subprocess.run(["git", "lfs", "pull"], cwd=os.path.dirname(__file__), check=True)
-        st.success("Git LFS pulled successfully!")
-    except subprocess.CalledProcessError:
-        st.warning("Git LFS not available or failed – model may not load properly.")
-    except FileNotFoundError:
-        st.warning("git-lfs not installed in Streamlit environment.")
-
-pull_lfs_files()  # Jalankan pas app start
 
 # --- Initial Configuration ---
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Use CPU only
 MODEL_PATH = "brain_tumor_segmentation.h5"
 IMAGE_WIDTH_PX = 450  # Slightly larger for better visuals
-
-# Load model dengan error handling
-if not os.path.exists(MODEL_PATH):
-    st.error("Model file not found! Check Git LFS pull.")
-    st.stop()
-else:
-    try:
-        model = tf.keras.models.load_model(MODEL_PATH)
-        st.success("Model loaded successfully!")
-    except Exception as e:
-        st.error(f"Failed to load model: {str(e)}")
-        st.stop()
 
 # ========================================
 # === ALL MODEL FUNCTIONS ===
