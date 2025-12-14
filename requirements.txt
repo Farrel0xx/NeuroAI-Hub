@@ -1,18 +1,19 @@
-# Core web framework for the app
+# Core
 streamlit==1.32.0
 
-# Deep learning (CPU version to avoid GPU warnings on Streamlit Cloud)
-tensorflow-cpu==2.15.0
+# TensorFlow latest (support Keras 3.x, fix batch_shape issue)
+tensorflow==2.17.0  # Versi 2025 terbaru, support input config baru
 
-# Image processing (headless REQUIRED for no libGL error)
-opencv-python-headless==4.9.0.80
+# Atau tensorflow-cpu kalau mau lebih ringan (no GPU warning)
+# tensorflow-cpu==2.17.0
 
-# Image handling
-Pillow==10.2.0
+# OpenCV headless (fix libGL error sebelumnya)
+opencv-python-headless==4.10.0.84
 
-# Numerical and scientific
-numpy==1.26.4
-scipy==1.11.4
+# Lainnya
+Pillow==10.4.0
+numpy==2.0.2
+scipy==1.14.1
 
-# Google Gemini API (for genai features like explanation or multimodal)
-google-genai==0.5.0
+# Gemini kalau masih dipake
+google-genai==0.8.0
