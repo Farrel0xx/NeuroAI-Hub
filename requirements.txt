@@ -1,8 +1,7 @@
---upgrade-pip
 streamlit
 tensorflow
-opencv-python-headless
-Pillow
 numpy
+Pillow
+opencv-python
 scipy
 google-genai
