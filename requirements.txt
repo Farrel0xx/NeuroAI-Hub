@@ -1,7 +1,7 @@
 tensorflow
 streamlit
 scipy
-opencv-python
+opencv-python-headless
 pillow
 google-generativeai
 pydicom
