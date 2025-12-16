@@ -1,7 +1,9 @@
-streamlit
 tensorflow
-numpy
-Pillow
-opencv-python-headless
+streamlit
 scipy
-google-genai
+opencv-python
+pillow
+google-generativeai
+pydicom
+imageio
+numpy
