@@ -5,6 +5,8 @@ import streamlit as st
 import scipy.ndimage
 import cv2
 from PIL import Image
+import io  # <-- TAMBAHAN: Untuk mengubah gambar ke bytes
+import base64  # Tambahan untuk display GIF
 
 # --- GEMINI IMPORT ---
 from google import genai
@@ -80,13 +82,16 @@ def generate_heatmap(mask, image_rgb):
     if tumor_ratio < 0.1:
         severity = "⚠️ Mild"
     elif 0.1 <= tumor_ratio < 0.3:
-        severity = "‼️Moderate"
+        severity = "‼️ Moderate"
     else:
         severity = "‼️ Severe"
 
     return overlay, severity, tumor_ratio * 100
 
 def segment_image(model, image_array):
+    # Ensure image_array is RGB
+    if image_array.ndim == 2:
+        image_array = cv2.cvtColor(image_array.astype(np.uint8), cv2.COLOR_GRAY2RGB)
     image_tensor = tf.convert_to_tensor(image_array, dtype=tf.float32)
     image_resized = tf.image.resize(image_tensor, (128, 128))
     image_resized = np.expand_dims(image_resized, axis=0) / 255.0
@@ -107,7 +112,8 @@ def segment_image(model, image_array):
 
     return mask_resized_output, heatmap_overlay, severity, tumor_ratio_percent
 
-def get_ai_interpretation(api_key, image_file, severity, tumor_ratio):
+# === MODIFIED FUNCTION FOR MULTIMODAL INPUT ===
+def get_ai_interpretation(api_key, original_image_array, heatmap_array, mask_array_255, severity, tumor_ratio):
     if not api_key:
         return "⚠️ Gemini API Key not provided. AI interpretation disabled."
 
@@ -117,35 +123,140 @@ def get_ai_interpretation(api_key, image_file, severity, tumor_ratio):
     except Exception as e:
         return f"❌ Gemini initialization failed: {e}"
 
+    # --- 1. Helper Function for Conversion ---
+    def array_to_image_part(img_array, mime_type="image/jpeg"):
+        # Ensure array is in uint8 format for PIL
+        img_pil = Image.fromarray(img_array.astype(np.uint8))
+        img_bytes = io.BytesIO()
+        img_pil.save(img_bytes, format='JPEG')
+        return types.Part.from_bytes(data=img_bytes.getvalue(), mime_type=mime_type)
+
+    # --- 2. Convert and Prepare Parts ---
+    
+    # Mask array might be grayscale, convert to 3-channel for better visual interpretation by Gemini
+    if mask_array_255.ndim == 2:
+        mask_array_rgb = cv2.cvtColor(mask_array_255.astype(np.uint8), cv2.COLOR_GRAY2RGB)
+    else:
+        mask_array_rgb = mask_array_255
+
+    original_part = array_to_image_part(original_image_array)
+    heatmap_part = array_to_image_part(heatmap_array)
+    mask_part = array_to_image_part(mask_array_rgb)
+
+    # --- 3. Prompt that requests analysis of all three images ---
     prompt = f"""
     You are a professional AI radiologist with extensive experience.
     This analysis is based on Deep Learning segmentation results from a brain MRI scan.
+    
+    You have been provided with THREE images for analysis:
+    1. The original MRI scan.
+    2. The segmentation Heatmap Overlay (Red/Orange = high tumor probability).
+    3. The Binary Segmentation Mask (White = detected tumor region).
 
-    Key findings:
+    Key findings from the DL model:
     - Severity Level : {severity}
     - Tumor Area Ratio: {tumor_ratio:.2f}%
 
-    Provide a concise, professional, and easy-to-understand interpretation in English, covering:
-    • Summary of main findings
-    • Explanation of the tumor ratio
-    • Recommended next steps based on severity level
+    Provide a concise, professional, and easy-to-understand interpretation in English.
+    Crucially, use the Heatmap and Mask to visually confirm the segmentation and comment on the tumor's appearance, shape, and localization.
+
+    • Summary of main findings, confirming the tumor area seen in the mask and heatmap.
+    • Analysis of the Tumor Ratio and its clinical implication.
+    • Recommended next steps based on severity level.
 
     Use clean bullet-point formatting.
     """
 
-    image_part = types.Part.from_bytes(
-        data=image_file.getvalue(),
-        mime_type=image_file.type
-    )
-
     try:
+        # Send prompt and all three image parts
         response = client.models.generate_content(
             model=GEMINI_MODEL,
-            contents=[prompt, image_part]
+            contents=[prompt, original_part, heatmap_part, mask_part]
         )
         return response.text
     except Exception as e:
         return f"❌ Gemini API Error: {e}"
+
+# ========================================
+# === FUNCTION TO GENERATE GIF FROM DICOM SLICES WITH SEGMENTATION ===
+# ========================================
+import pydicom
+import imageio
+
+def generate_gif_from_dicom(model, dicom_files, output_gif='animation.gif', gemini_api_key=None):
+    slices = []
+    for file in dicom_files:
+        try:
+            ds = pydicom.dcmread(io.BytesIO(file.getvalue()))
+            key = ds.InstanceNumber if hasattr(ds, 'InstanceNumber') else (ds.SliceLocation if hasattr(ds, 'SliceLocation') else 0)
+            slices.append((key, ds))
+        except:
+            pass
+
+    if len(slices) == 0:
+        st.error("No valid DICOM files found.")
+        return None, None, None
+
+    slices.sort(key=lambda x: x[0])
+    datasets = [s[1] for s in slices]
+
+    images = []
+    tumor_ratios = []
+    severities = []
+    representative_original = None
+    representative_heatmap = None
+    representative_mask = None
+    middle_index = len(datasets) // 2
+
+    for i, ds in enumerate(datasets):
+        img = ds.pixel_array
+        low, high = np.percentile(img, (1, 99))
+        img = np.clip(img, low, high)
+        img = (img - img.min()) / (img.max() - img.min() + 1e-6) * 255
+        img = img.astype(np.uint8)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+
+        mask, heatmap, severity, tumor_ratio = segment_image(model, img_rgb)
+        images.append(heatmap)  # Use segmented heatmap as frame
+        tumor_ratios.append(tumor_ratio)
+        severities.append(severity)
+
+        if i == middle_index:
+            representative_original = img_rgb
+            representative_heatmap = heatmap
+            representative_mask = (mask * 255).astype(np.uint8)
+
+    images += images[-2::-1]  # Bolak-balik for smooth animation
+
+    # Save GIF with infinite loop
+    imageio.mimsave(output_gif, images, duration=0.1, loop=0)
+
+    # Calculate average metrics
+    avg_tumor_ratio = np.mean(tumor_ratios)
+    overall_severity = max(set(severities), key=severities.count)  # Most common severity
+
+    # Get AI report for representative slice if API key provided
+    ai_report = None
+    if gemini_api_key:
+        ai_report = get_ai_interpretation(
+            gemini_api_key,
+            representative_original,
+            representative_heatmap,
+            representative_mask,
+            overall_severity,
+            avg_tumor_ratio
+        )
+
+    return output_gif, overall_severity, avg_tumor_ratio, ai_report
+
+# ========================================
+# === FUNCTION TO DISPLAY ANIMATED GIF ===
+# ========================================
+def display_gif(gif_path):
+    with open(gif_path, 'rb') as f:
+        gif_bytes = f.read()
+    base64_gif = base64.b64encode(gif_bytes).decode('utf-8')
+    st.markdown(f'<img src="data:image/gif;base64,{base64_gif}" alt="brain tumor animation" width="{IMAGE_WIDTH_PX}">', unsafe_allow_html=True)
 
 # ========================================
 # === ENHANCED CSS: EVEN COOLER, MODERN FUTURISTIC THEME ===
@@ -278,7 +389,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- Sidebar ---
+# --- Sidebar with more explanations ---
 with st.sidebar:
     # Premium glowing neon brain logo (transparent PNG)
     st.image("https://thumbs.dreamstime.com/b/futuristic-glowing-ai-brain-made-neon-circuits-digital-data-streams-set-dark-gradient-background-visually-356224505.jpg", width=200)
@@ -286,13 +397,46 @@ with st.sidebar:
     st.title("🧠 NeuroAI Hub")
     
     st.markdown("""
-    **Welcome to NeuroAI Hub**  
-    Advanced AI-Powered Medical Imaging Solutions
+    **Welcome to NeuroAI Hub** - Advanced AI-Powered Medical Imaging Solutions
 
-    Cutting-edge platform for brain MRI analysis using Deep Learning (U-Net architecture) to accurately detect and segment brain tumors with high precision and stunning visualizations.
+    This platform provides cutting-edge brain MRI analysis using Deep Learning (U-Net architecture) to detect and segment brain tumors with high precision. It includes stunning visualizations, AI-powered radiologist interpretations, and animated DICOM series analysis.
     """)
     
-    st.markdown("### Advanced Brain Tumor Segmentation")
+    st.markdown("### Key Features")
+    st.markdown("""
+    - **Tumor Segmentation**: Uses U-Net model for accurate tumor detection.
+    - **Heatmap Overlays**: Visualizes tumor probability with color-coded maps.
+    - **Severity Assessment**: Classifies tumor severity based on area ratio.
+    - **AI Interpretation**: Powered by Gemini AI for professional radiological reports.
+    - **DICOM Animation**: Creates looping GIFs with segmented overlays from DICOM series.
+    - **Multi-Slice Analysis**: Processes entire series for comprehensive insights.
+    """)
+    
+    st.markdown("### How It Works")
+    st.markdown("""
+    1. Upload a single MRI image or multiple DICOM files.
+    2. The U-Net model segments potential tumor regions.
+    3. Generate heatmaps, masks, and metrics.
+    4. For DICOM series, create animated GIF with segmentation.
+    5. Gemini AI provides detailed analysis and recommendations.
+    """)
+    
+    st.markdown("### Important Notes")
+    st.markdown("""
+    - This tool is for educational and research purposes only. Not a substitute for professional medical advice.
+    - Ensure images are anonymized and comply with privacy regulations.
+    - Model accuracy depends on training data; always consult a healthcare professional.
+    - For best results, use high-quality MRI scans in supported formats.
+    """)
+    
+    st.markdown("### Advanced Usage")
+    st.markdown("""
+    - **Single Image**: Upload JPG/PNG for static analysis.
+    - **DICOM Series**: Upload multiple .dcm files for animated visualization.
+    - **API Integration**: Enter Gemini API key for enhanced AI reports.
+    - **Customization**: Adjust thresholds in code for fine-tuning (advanced users).
+    """)
+    
     st.markdown("---")
     
     st.subheader("🔑 Gemini API Key")
@@ -307,23 +451,27 @@ with st.sidebar:
     if model:
         st.success("✅ U-Net Model Loaded Successfully")
         if gemini_api_key:
-            st.success("✨ Gemini AI Interpretation Enabled")
+            st.success("✨ Gemini AI Interpretation Enabled (Multimodal)")
         else:
             st.info("Enter API Key to enable AI report")
     else:
         st.error("❌ Model not found – ensure .h5 file exists")
     
     st.markdown("---")
-    st.caption("***📌 Created by Farrel0xx • Build on Streamlit • ✨ Analysis by Gemini AI***")
+    st.caption("***📌 Created by Farrel0xx • Built on Streamlit • ✨ Analysis by Gemini AI***")
 
 # --- Main App ---
 st.title("🧠 NeuroAI: Advanced Brain Tumor Detection")
 
 st.markdown("""
 **Upload a brain MRI image** for state-of-the-art tumor segmentation using Deep Learning, complete with premium visualizations and AI-powered radiologist interpretation.
+
+This section allows analysis of single static images. For dynamic series, use the DICOM Animation section below.
 """)
 
-st.info("👆 Example MRI images are shown below for reference. Upload your own scan to begin analysis.")
+st.info("""
+**Guide**: Upload high-resolution brain MRI scans in axial, coronal, or sagittal views. The system will automatically detect and highlight potential tumor regions.
+""")
 
 # Example MRI images for better UX
 col_ex1, col_ex2 = st.columns(2)
@@ -337,7 +485,6 @@ uploaded_file = st.file_uploader("Choose an MRI image (.jpg, .jpeg, .png)", type
 if uploaded_file is not None:
     image = Image.open(uploaded_file).convert("RGB")
     image_array = np.array(image)
-    uploaded_file.seek(0)
     
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -357,9 +504,9 @@ if uploaded_file is not None:
             with col_r:
                 st.markdown(f'<div class="ratio-box">Tumor Area Ratio<br>{tumor_ratio:.2f}%</div>', unsafe_allow_html=True)
 
-            if severity == "Severe":
+            if "Severe" in severity:
                 st.error("🚨 **CRITICAL:** Severe tumor detected – immediate medical consultation required!")
-            elif severity == "Moderate":
+            elif "Moderate" in severity:
                 st.warning("⚠️ **ATTENTION:** Moderate tumor detected – follow-up examination recommended")
             else:
                 st.success("✅ **SAFE:** Mild findings – continue routine monitoring")
@@ -368,8 +515,14 @@ if uploaded_file is not None:
 
             if gemini_api_key:
                 with st.spinner("👩‍⚕️ AI Radiologist analyzing results..."):
-                    uploaded_file.seek(0)
-                    ai_report = get_ai_interpretation(gemini_api_key, uploaded_file, severity, tumor_ratio)
+                    ai_report = get_ai_interpretation(
+                        gemini_api_key, 
+                        image_array, 
+                        heatmap_overlay, 
+                        (mask_resized * 255).astype(np.uint8),
+                        severity, 
+                        tumor_ratio
+                    )
                 
                 st.markdown("### 👩‍⚕️ AI Radiologist Report (Gemini 2.5 Flash)")
                 
@@ -397,9 +550,62 @@ if uploaded_file is not None:
                 - **Heatmap Overlay**: Combines original image with JET colormap to highlight tumor boundaries.
                 - **Severity & Ratio**: Automatically calculated based on tumor area percentage relative to total image.
                 - **Model**: Trained U-Net with combined Tversky + Dice loss for optimal segmentation performance.
+                - **Post-processing**: Includes dilation and erosion for smoother masks.
                 """)
 
         except Exception as e:
             st.error(f"Analysis error: {e}")
 else:
     st.info("👆 Upload a brain MRI image to start the analysis.")
+
+# --- New Section for DICOM Animation ---
+st.markdown("---")
+st.title("📽️ Brain Tumor DICOM Animation")
+
+st.markdown("""
+Upload multiple DICOM files (.dcm) from a series (e.g., coronal or sagittal slices) to generate and display an animated GIF showing slice-by-slice tumor visualization with segmentation overlays.
+
+This feature processes each slice individually, applies tumor segmentation, and creates a continuously looping animation for dynamic viewing.
+""")
+
+st.info("""
+**Guide**: Upload a series of DICOM files from the same scan. The system will sort them, segment tumors, and generate an infinite-looping GIF with heatmaps. AI analysis is provided for the entire series based on a representative slice.
+""")
+
+uploaded_dicom_files = st.file_uploader("Choose DICOM files (.dcm)", type=["dcm"], accept_multiple_files=True)
+
+if uploaded_dicom_files:
+    if model and st.button("▶️ Generate and Display Animation", type="primary", use_container_width=True):
+        with st.spinner("🔬 Generating segmented animation from DICOM slices..."):
+            gif_path, overall_severity, avg_tumor_ratio, ai_report = generate_gif_from_dicom(model, uploaded_dicom_files, gemini_api_key=gemini_api_key)
+            if gif_path:
+                st.subheader("🎥 DICOM Slice Animation with Segmentation")
+                display_gif(gif_path)
+                
+                col_m, col_r = st.columns(2)
+                with col_m:
+                    st.metric("***Overall Severity***", overall_severity)
+                with col_r:
+                    st.markdown(f'<div class="ratio-box">Average Tumor Ratio<br>{avg_tumor_ratio:.2f}%</div>', unsafe_allow_html=True)
+                
+                if ai_report:
+                    st.markdown("### 👩‍⚕️ AI Analysis of DICOM Series (Gemini 2.5 Flash)")
+                    st.markdown(f"""
+                    <div class="doctor-box">
+                    {ai_report}
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.info("Enable Gemini API for series analysis.")
+                
+                st.markdown("**Note:** The animation scrolls through slices forward and backward for smooth viewing. Includes segmentation overlays (red/orange for tumors). GIF loops continuously.")
+                
+                with st.expander("📚 DICOM Animation Explanation"):
+                    st.markdown("""
+                    - **Segmentation per Slice**: Each frame shows the heatmap overlay on the original slice.
+                    - **Sorting**: Slices are sorted by Instance Number or Slice Location.
+                    - **Normalization**: Images are contrast-adjusted for better visibility.
+                    - **Looping**: Infinite loop for continuous replay.
+                    - **Metrics**: Average tumor ratio and majority severity across all slices.
+                    - **AI Report**: Based on a representative middle slice, providing insights for the series.
+                    """)
